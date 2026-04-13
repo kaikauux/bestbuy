@@ -1,43 +1,85 @@
 # bestbuy
 
-Supporting scripts for light crawling and diagnostics against Best Buy search pages.
+Supporting scripts for light crawling of Best Buy search pages.
 
-## What this starts with
+## What works now
 
-The first pass is a probe against a specific Best Buy search URL to answer a basic question: from this runtime, what can we actually read?
+Plain `requests` / `curl` from this runtime stalled after TLS completed. A browser-impersonating client via `curl-cffi` works and returns full HTML from both the homepage and the target search page.
 
-Current result from this environment:
+The search page HTML includes an Apollo SSR transport payload with `detailedProductSearch.documents`, which is enough to extract structured search results without needing a browser renderer.
 
-- DNS resolution works for `www.bestbuy.com`
-- TCP connection to port 443 succeeds
-- HTTP `HEAD` and `GET` requests time out before any response body is received
-- That means we do not yet have reliable page HTML or product JSON from this runtime
+## Root cause, in short
+
+- DNS worked
+- TCP to `www.bestbuy.com:443` worked
+- TLS handshake completed
+- raw HTTP clients received no response bytes before timeout
+- `curl-cffi` with Chrome impersonation succeeded immediately and set Akamai/bot-manager cookies like `_abck`, `bm_sz`, and `ak_bmsc`
+
+That points to request fingerprinting / bot mitigation, not a basic network failure.
 
 ## Files
 
-- `scripts/probe_search_page.py` — small diagnostic probe for a Best Buy URL
-- `reports/initial_probe.json` — captured output from the first probe run
-- `reports/initial_probe.md` — short human-readable summary
+- `bestbuy/search.py` — fetch + parse helpers
+- `scripts/fetch_search_results.py` — CLI entrypoint
+- `scripts/probe_search_page.py` — low-level reachability probe from the first pass
+- `reports/initial_probe.json` — raw low-level probe output
+- `reports/initial_probe.md` — first-pass summary
+- `tests/test_search_parser.py` — parser regression test
+- `tests/fixtures/searchpage.html` — saved real search-page fixture
+
+## Install
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 ## Usage
 
+Fetch live and print parsed results:
+
 ```bash
-python3 scripts/probe_search_page.py 'https://www.bestbuy.com/site/searchpage.jsp?...'
+python3 scripts/fetch_search_results.py \
+  --url 'https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&qp=parent_laptopscreensizesv_facet%3DScreen+Size%7E14%22+-+15.9%22%5Eparent_laptopscreensizesv_facet%3DScreen+Size%7E12%22+-+13.9%22%5Econdition_facet%3DOpen-Box%7EOpen-Box%5Esystemmemoryram_facet%3DRAM%7E32+gigabytes%5Esystemmemoryram_facet%3DRAM%7E64+gigabytes%5Esystemmemoryram_facet%3DRAM%7E128+gigabytes%5Esystemmemoryram_facet%3DRAM%7E36+gigabytes&st=5070+Ti+laptop' \
+  --pretty
 ```
 
-The script prints JSON with:
+Fetch live and save the raw HTML too:
 
-- DNS resolution result
-- TCP connect result
-- `HEAD` request result
-- `GET` request result
+```bash
+python3 scripts/fetch_search_results.py --url 'https://www.bestbuy.com/site/searchpage.jsp?st=5070+Ti+laptop' --save-html reports/latest.html --pretty
+```
 
-## Next steps
+Parse a saved HTML file:
 
-Once we find a request shape that returns actual content, we can add:
+```bash
+python3 scripts/fetch_search_results.py --html tests/fixtures/searchpage.html --pretty
+```
 
-1. lightweight result-page fetchers
-2. parsers for embedded JSON or product cards
-3. polite pagination and rate limiting
-4. snapshot diffing for price / inventory changes
+## Output shape
+
+Each parsed result currently includes:
+
+- `sku_id`
+- `title`
+- `short_name`
+- `brand`
+- `model_number`
+- `condition`
+- `customer_price`
+- `regular_price`
+- `displayable_customer_price`
+- `price_with_cart`
+- `product_url`
+- `sku_url`
+- `image_url`
+- `average_rating`
+- `review_count`
+- `button_state`
+- `open_box_options`
+
+## Test
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
