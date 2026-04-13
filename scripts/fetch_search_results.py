@@ -8,7 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bestbuy.search import FetchConfig, fetch_search_html, summarize_search_results
+from bestbuy.search import (
+    FetchConfig,
+    fetch_all_search_results,
+    fetch_search_html,
+    summarize_search_results,
+)
 
 
 def main() -> int:
@@ -18,16 +23,21 @@ def main() -> int:
     source.add_argument('--html', help='Path to previously saved HTML')
     parser.add_argument('--save-html', help='Optional path to save fetched HTML')
     parser.add_argument('--pretty', action='store_true', help='Pretty-print JSON output')
+    parser.add_argument('--all-pages', action='store_true', help='Fetch all pages when using --url')
+    parser.add_argument('--max-pages', type=int, default=20, help='Max pages to fetch with --all-pages')
     args = parser.parse_args()
 
-    if args.url:
+    if args.url and args.all_pages:
+        summary = fetch_all_search_results(args.url, config=FetchConfig(), max_pages=args.max_pages)
+    elif args.url:
         html = fetch_search_html(args.url, config=FetchConfig())
         if args.save_html:
             Path(args.save_html).write_text(html, encoding='utf-8')
+        summary = summarize_search_results(html)
     else:
         html = Path(args.html).read_text(encoding='utf-8', errors='ignore')
+        summary = summarize_search_results(html)
 
-    summary = summarize_search_results(html)
     print(json.dumps(summary, indent=2 if args.pretty else None, sort_keys=args.pretty))
     return 0
 

@@ -20,8 +20,9 @@ That points to request fingerprinting / bot mitigation, not a basic network fail
 
 ## Files
 
-- `bestbuy/search.py` — fetch + parse helpers
-- `scripts/fetch_search_results.py` — CLI entrypoint
+- `bestbuy/search.py` — fetch, pagination, availability, and parse helpers
+- `scripts/fetch_search_results.py` — JSON CLI entrypoint
+- `scripts/hourly_available_report.py` — human-readable hourly report CLI
 - `scripts/probe_search_page.py` — low-level reachability probe from the first pass
 - `reports/initial_probe.json` — raw low-level probe output
 - `reports/initial_probe.md` — first-pass summary
@@ -36,12 +37,28 @@ python3 -m pip install -r requirements.txt
 
 ## Usage
 
-Fetch live and print parsed results:
+Fetch one page and print parsed JSON:
 
 ```bash
 python3 scripts/fetch_search_results.py \
   --url 'https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&qp=parent_laptopscreensizesv_facet%3DScreen+Size%7E14%22+-+15.9%22%5Eparent_laptopscreensizesv_facet%3DScreen+Size%7E12%22+-+13.9%22%5Econdition_facet%3DOpen-Box%7EOpen-Box%5Esystemmemoryram_facet%3DRAM%7E32+gigabytes%5Esystemmemoryram_facet%3DRAM%7E64+gigabytes%5Esystemmemoryram_facet%3DRAM%7E128+gigabytes%5Esystemmemoryram_facet%3DRAM%7E36+gigabytes&st=5070+Ti+laptop' \
   --pretty
+```
+
+Fetch every page for a query and return a deduplicated JSON report:
+
+```bash
+python3 scripts/fetch_search_results.py \
+  --url 'https://www.bestbuy.com/site/searchpage.jsp?st=5070+Ti+laptop' \
+  --all-pages \
+  --pretty
+```
+
+Print the hourly human-readable availability report:
+
+```bash
+python3 scripts/hourly_available_report.py \
+  --url 'https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&qp=parent_laptopscreensizesv_facet%3DScreen+Size%7E14%22+-+15.9%22%5Eparent_laptopscreensizesv_facet%3DScreen+Size%7E12%22+-+13.9%22%5Econdition_facet%3DOpen-Box%7EOpen-Box%5Esystemmemoryram_facet%3DRAM%7E32+gigabytes%5Esystemmemoryram_facet%3DRAM%7E64+gigabytes%5Esystemmemoryram_facet%3DRAM%7E128+gigabytes%5Esystemmemoryram_facet%3DRAM%7E36+gigabytes&st=5070+Ti+laptop'
 ```
 
 Fetch live and save the raw HTML too:
