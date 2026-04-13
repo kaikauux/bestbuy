@@ -102,12 +102,59 @@ def parse_card_text(text: str, href: str) -> BrowserResult | None:
     )
 
 
+def _find_all_key(obj, key, depth=0, max_depth=12) -> list:
+    """Find all values for a given key anywhere in a nested structure."""
+    if depth > max_depth:
+        return []
+    results = []
+    if isinstance(obj, dict):
+        if key in obj:
+            results.append(obj[key])
+        for v in obj.values():
+            results.extend(_find_all_key(v, key, depth + 1, max_depth))
+    elif isinstance(obj, list):
+        for item in obj:
+            results.extend(_find_all_key(item, key, depth + 1, max_depth))
+    return results
+
+
+def _extract_open_box_entries(product: dict, fallback_sku_id: str | None = None) -> list[dict[str, Any]]:
+    """Extract open-box option entries from a product dict."""
+    ob_options = product.get('openBoxOptions', [])
+    if not isinstance(ob_options, list):
+        return []
+
+    sku_id = product.get('skuId') or fallback_sku_id
+    entries = []
+    for ob in ob_options:
+        ob_product = ob.get('product', {})
+        ob_price = ob_product.get('price', {})
+        ob_sku = ob_product.get('skuId') or sku_id
+        ob_url_obj = ob_product.get('url', {})
+        ob_url = ob_url_obj.get('pdp', '') if isinstance(ob_url_obj, dict) else ''
+
+        entry = {
+            'condition': ob.get('type'),  # Excellent, Good, Fair
+            'customer_price': ob_price.get('customerPrice'),
+            'open_box_savings': ob_price.get('openBoxSavings'),
+            'sku_id': ob_sku,
+            'url': ob_url,
+        }
+        entries.append(entry)
+    return entries
+
+
 def parse_apollo_ssr(html: str) -> dict[str, dict[str, Any]]:
     """Extract open-box pricing metadata from Apollo SSR payloads in page HTML.
 
     Returns a dict keyed by skuId, each value containing:
       - regular_price: the new/product regular price (float)
       - open_box_options: list of dicts with keys condition, customer_price, open_box_savings, sku_id, url
+
+    Handles two payload structures:
+    1. Page 1: detailedProductSearch.documents[].product (with .price and .openBoxOptions)
+    2. Page 2+: events[].result.data.productBySkuId.buyingOptions[].product (with .openBoxOptions)
+       Also rehydrate entries with productBySkuId.
     """
     apollo_pattern = r'\(window\[Symbol\.for\("ApolloSSRDataTransport"\)\]\s*\?\?=\s*\[\]\)\.push\((.+?)\);?\s*</script>'
     matches = re.findall(apollo_pattern, html, re.DOTALL)
@@ -126,71 +173,140 @@ def parse_apollo_ssr(html: str) -> dict[str, dict[str, Any]]:
         except json.JSONDecodeError:
             continue
 
-        def find_key(obj, key, depth=0):
-            if depth > 10:
-                return None
-            if isinstance(obj, dict):
-                if key in obj:
-                    return obj[key]
-                for v in obj.values():
-                    result = find_key(v, key, depth + 1)
-                    if result is not None:
-                        return result
-            elif isinstance(obj, list):
-                for item in obj:
-                    result = find_key(item, key, depth + 1)
-                    if result is not None:
-                        return result
-            return None
-
-        search_data = find_key(data, 'detailedProductSearch')
-        if not search_data or not isinstance(search_data, dict):
-            continue
-        documents = search_data.get('documents')
-        if not isinstance(documents, list):
-            continue
-
-        for doc in documents:
-            product = doc.get('product')
-            if not product:
+        # --- Path 1: detailedProductSearch (page 1 style) ---
+        for search_data in _find_all_key(data, 'detailedProductSearch'):
+            if not isinstance(search_data, dict):
+                continue
+            documents = search_data.get('documents')
+            if not isinstance(documents, list):
                 continue
 
-            sku_id = product.get('skuId')
+            for doc in documents:
+                product = doc.get('product')
+                if not product or not isinstance(product, dict):
+                    continue
+
+                sku_id = product.get('skuId')
+                if not sku_id:
+                    continue
+
+                # Get regular price from the product-level price object
+                regular_price = None
+                price_obj = product.get('price', {})
+                if isinstance(price_obj, dict):
+                    regular_price = price_obj.get('displayableRegularPrice') or price_obj.get('customerPrice')
+
+                open_box_entries = _extract_open_box_entries(product, sku_id)
+
+                sku_map[sku_id] = {
+                    'regular_price': regular_price,
+                    'open_box_options': open_box_entries,
+                }
+
+        # --- Path 2: productBySkuId (page 2+ style, in both rehydrate and events) ---
+        for pbs_obj in _find_all_key(data, 'productBySkuId'):
+            if not isinstance(pbs_obj, dict):
+                continue
+
+            # Extract SKU ID and regular price from the top-level productBySkuId
+            sku_id = pbs_obj.get('skuId')
             if not sku_id:
                 continue
 
-            # Get regular price from the product-level price object
+            # Try to get regular price from the top-level object
             regular_price = None
-            price_obj = product.get('price', {})
+            price_obj = pbs_obj.get('price', {})
             if isinstance(price_obj, dict):
                 regular_price = price_obj.get('displayableRegularPrice') or price_obj.get('customerPrice')
 
-            # Get open-box options
-            ob_options = product.get('openBoxOptions', [])
-            if not isinstance(ob_options, list):
-                ob_options = []
+            # buyingOptions contains products with openBoxOptions
+            buying_options = pbs_obj.get('buyingOptions', [])
+            if isinstance(buying_options, list):
+                all_ob_entries = []
+                for bo in buying_options:
+                    bo_product = bo.get('product', {})
+                    if not isinstance(bo_product, dict):
+                        continue
+                    bo_sku = bo_product.get('skuId') or sku_id
 
-            open_box_entries = []
-            for ob in ob_options:
-                ob_product = ob.get('product', {})
-                ob_price = ob_product.get('price', {})
-                ob_sku = ob_product.get('skuId') or sku_id
-                ob_url_obj = ob_product.get('url', {})
-                ob_url = ob_url_obj.get('pdp', '') if isinstance(ob_url_obj, dict) else ''
+                    # Get regular price from buying option product if not yet found
+                    if regular_price is None:
+                        bo_price = bo_product.get('price', {})
+                        if isinstance(bo_price, dict):
+                            regular_price = bo_price.get('displayableRegularPrice') or bo_price.get('customerPrice')
 
-                entry = {
-                    'condition': ob.get('type'),  # Excellent, Good, Fair
-                    'customer_price': ob_price.get('customerPrice'),
-                    'open_box_savings': ob_price.get('openBoxSavings'),
-                    'sku_id': ob_sku,
-                    'url': ob_url,
-                }
-                open_box_entries.append(entry)
+                    entries = _extract_open_box_entries(bo_product, bo_sku)
+                    all_ob_entries.extend(entries)
 
-            sku_map[sku_id] = {
-                'regular_price': regular_price,
-                'open_box_options': open_box_entries,
-            }
+                if all_ob_entries or sku_id not in sku_map:
+                    # Only overwrite if we found new data or the SKU wasn't already mapped
+                    existing = sku_map.get(sku_id, {'regular_price': None, 'open_box_options': []})
+                    if all_ob_entries:
+                        # Merge open_box_options, deduplicating by condition+sku_id
+                        existing_conditions = {
+                            (e['condition'], e['sku_id']) for e in existing['open_box_options']
+                            if e.get('condition') and e.get('sku_id')
+                        }
+                        for entry in all_ob_entries:
+                            key = (entry.get('condition'), entry.get('sku_id'))
+                            if key not in existing_conditions:
+                                existing['open_box_options'].append(entry)
+                                existing_conditions.add(key)
+
+                    if regular_price is not None:
+                        existing['regular_price'] = regular_price
+                    elif existing.get('regular_price') is None:
+                        existing['regular_price'] = regular_price
+
+                    sku_map[sku_id] = existing
+            else:
+                # No buyingOptions, but still register the SKU with whatever we have
+                if sku_id not in sku_map:
+                    sku_map[sku_id] = {
+                        'regular_price': regular_price,
+                        'open_box_options': [],
+                    }
+
+    # --- Path 3: React SSR streaming data (page 2+ fallback) ---
+    # Best Buy embeds open-box pricing in RSC streaming HTML when Apollo payloads are sparse.
+    ob_pattern = r'"customerPrice":([\d.]+),"skuId":"(\d+)","openBoxSavings":([\d.]+),"openBoxCondition":(\d+)'
+    for price_str, sku_id, savings_str, cond_code in re.findall(ob_pattern, html):
+        cond_name = {0: 'Fair', 1: 'Good', 2: 'Excellent'}.get(int(cond_code))
+        if not cond_name:
+            continue
+        if sku_id not in sku_map:
+            sku_map[sku_id] = {'regular_price': None, 'open_box_options': []}
+        existing = sku_map[sku_id]
+        # Set regular price from displayableRegularPrice if found nearby
+        reg_pattern = rf'"displayableRegularPrice":([\d.]+).*?"skuId":"{sku_id}"'
+        reg_match = re.search(reg_pattern, html)
+        if reg_match and existing.get('regular_price') is None:
+            existing['regular_price'] = float(reg_match.group(1))
+        # Add open-box entry if not already present for this condition
+        existing_conditions = {
+            (e['condition'], e['sku_id']) for e in existing['open_box_options']
+            if e.get('condition') and e.get('sku_id')
+        }
+        entry_key = (cond_name, sku_id)
+        if entry_key not in existing_conditions:
+            existing['open_box_options'].append({
+                'condition': cond_name,
+                'customer_price': float(price_str),
+                'open_box_savings': float(savings_str),
+                'sku_id': sku_id,
+                'url': '',
+            })
+            existing_conditions.add(entry_key)
+
+    # Fallback: compute regular_price from customerPrice + openBoxSavings if still missing
+    for sku_id, data in sku_map.items():
+        if data.get('regular_price') is None:
+            for ob in data.get('open_box_options', []):
+                cp = ob.get('customer_price')
+                sv = ob.get('open_box_savings')
+                if cp is not None and sv is not None:
+                    data['regular_price'] = round(cp + sv, 2)
+                    break
 
     return sku_map
 
