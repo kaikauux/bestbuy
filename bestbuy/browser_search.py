@@ -339,8 +339,15 @@ def _scroll_page(page) -> None:
         page.wait_for_timeout(1000)
 
 
-def _extract_results_from_page(page) -> list[BrowserResult]:
+def _extract_results_from_page(page) -> tuple[list[BrowserResult], set[str]]:
+    """Extract hydrated product cards and unhydrated SKU IDs from search page.
+
+    Returns (results, unhydrated_sku_ids) where unhydrated_sku_ids are SKUs
+    from "See price in cart" cards that have no hydrated data but do have
+    a data-product-id attribute.
+    """
     collected: dict[str, BrowserResult] = {}
+    unhydrated_skus: set[str] = set()
     for _ in range(2):
         cards = page.locator(RESULT_CARD_SELECTOR)
         for index in range(cards.count()):
@@ -349,6 +356,14 @@ def _extract_results_from_page(page) -> list[BrowserResult]:
                 text = card.inner_text().strip()
             except Exception:
                 continue
+
+            # Check for unhydrated "See price in cart" card with data-product-id
+            if 'See price in cart' in text and 'Open-box as low as' not in text:
+                product_id = card.get_attribute('data-product-id')
+                if product_id:
+                    unhydrated_skus.add(product_id)
+                continue
+
             links = card.locator('a.product-list-item-link').evaluate_all(
                 "els => els.map(e => ({href: e.href, text: (e.innerText || '').trim()}))"
             )
@@ -359,7 +374,7 @@ def _extract_results_from_page(page) -> list[BrowserResult]:
             if parsed is not None and parsed.available:
                 collected[href] = parsed
         page.wait_for_timeout(1000)
-    return list(collected.values())
+    return list(collected.values()), unhydrated_skus
 
 
 def _enrich_with_apollo(results: list[BrowserResult], sku_map: dict[str, dict[str, Any]]) -> None:
@@ -421,6 +436,7 @@ def fetch_available_results_browser(
         shipping_zip = None
         pages_scanned = 0
         combined_sku_map: dict[str, dict[str, Any]] = {}
+        all_unhydrated_skus: set[str] = set()
 
         for page_number in range(1, max_pages + 1):
             context = browser.new_context(
@@ -439,18 +455,21 @@ def fetch_available_results_browser(
             page.goto(set_page_number(search_url, page_number), wait_until='domcontentloaded', timeout=120000)
             page.wait_for_timeout(12000)
             _scroll_page(page)
-            page_results = _extract_results_from_page(page)
+            page_results, page_unhydrated = _extract_results_from_page(page)
 
             # Extract Apollo SSR data from this page's HTML
             html = page.content()
             page_sku_map = parse_apollo_ssr(html)
             combined_sku_map.update(page_sku_map)
 
+            # Track unhydrated SKUs across pages
+            all_unhydrated_skus.update(page_unhydrated)
+
             body_text = page.locator('body').inner_text()
             if result_count_label is None:
                 result_count_label, pickup_summary, shipping_summary, shipping_zip = _extract_body_meta(body_text)
             context.close()
-            if not page_results:
+            if not page_results and not page_unhydrated:
                 break
             pages_scanned += 1
             all_results.extend(page_results)
@@ -459,6 +478,60 @@ def fetch_available_results_browser(
 
     # Enrich results with Apollo data
     _enrich_with_apollo(all_results, combined_sku_map)
+
+    # Synthesize results for unhydrated "See price in cart" SKUs from RSC data
+    already_seen_skus = set()
+    for r in all_results:
+        sku_match = re.search(r'/sku/(\d+)', r.href)
+        if sku_match:
+            already_seen_skus.add(sku_match.group(1))
+
+    for sku_id in all_unhydrated_skus:
+        if sku_id in already_seen_skus:
+            continue
+        sku_data = combined_sku_map.get(sku_id)
+
+        # Check if RSC data has open-box options for this SKU
+        ob_options = sku_data.get('open_box_options', []) if sku_data else []
+        has_pricing = any(o.get('open_box_savings') is not None for o in ob_options)
+
+        if has_pricing:
+            # Sort by open_box_savings descending (biggest savings first)
+            best = sorted(
+                [ob for ob in ob_options if ob.get('open_box_savings') is not None],
+                key=lambda ob: ob['open_box_savings'],
+                reverse=True,
+            )
+            ob = best[0]
+            synthetic = BrowserResult(
+                title=f'(unhydrated SKU {sku_id})',
+                href=ob.get('url', '') or f'https://www.bestbuy.com/site/searchpage.jsp?st={sku_id}',
+                open_box_price=f'{ob["customer_price"]:,.2f}' if ob.get('customer_price') is not None else None,
+                regular_price=f'{sku_data["regular_price"]:,.2f}' if sku_data.get('regular_price') is not None else None,
+                savings=f'{ob["open_box_savings"]:,.2f}' if ob.get('open_box_savings') is not None else None,
+                condition=ob.get('condition'),
+                rating=None,
+                review_count=None,
+                available=True,
+                availability_note=None,
+                raw_text='',
+            )
+        else:
+            # No pricing data at all — still list it so the user knows it exists
+            synthetic = BrowserResult(
+                title=f'(unhydrated — see site for price)',
+                href=f'https://www.bestbuy.com/site/searchpage.jsp?st={sku_id}',
+                open_box_price=None,
+                regular_price=None,
+                savings=None,
+                condition=None,
+                rating=None,
+                review_count=None,
+                available=True,
+                availability_note=None,
+                raw_text='',
+            )
+        all_results.append(synthetic)
 
     deduped: list[dict[str, Any]] = []
     seen = set()
