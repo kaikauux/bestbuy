@@ -4,9 +4,15 @@ Supporting scripts for light crawling of Best Buy search pages.
 
 ## What works now
 
-Plain `requests` / `curl` from this runtime stalled after TLS completed. A browser-impersonating client via `curl-cffi` works and returns full HTML from both the homepage and the target search page.
+Plain `requests` / `curl` from this runtime stalled after TLS completed. A browser-impersonating client via `curl-cffi` works for raw HTML fetches, but the Best Buy page only server-renders a partial subset of results.
 
-The search page HTML includes an Apollo SSR transport payload with `detailedProductSearch.documents`, which is enough to extract structured search results without needing a browser renderer.
+The working hourly path is now browser-backed with Playwright:
+
+- open a real Chromium session
+- set the store context to `Union City`
+- load the search page after hydration
+- scroll to hydrate visible result cards
+- collect currently available open-box items across pages
 
 ## Root cause, in short
 
@@ -14,15 +20,17 @@ The search page HTML includes an Apollo SSR transport payload with `detailedProd
 - TCP to `www.bestbuy.com:443` worked
 - TLS handshake completed
 - raw HTTP clients received no response bytes before timeout
-- `curl-cffi` with Chrome impersonation succeeded immediately and set Akamai/bot-manager cookies like `_abck`, `bm_sz`, and `ak_bmsc`
+- `curl-cffi` with Chrome impersonation succeeded, but only exposed a partial SSR subset
+- the full, accurate availability view requires the hydrated browser DOM
 
-That points to request fingerprinting / bot mitigation, not a basic network failure.
+That means the real fix is not just anti-bot fingerprinting. It is anti-bot plus client-side rendering.
 
 ## Files
 
-- `bestbuy/search.py` — fetch, pagination, availability, and parse helpers
-- `scripts/fetch_search_results.py` — JSON CLI entrypoint
-- `scripts/hourly_available_report.py` — human-readable hourly report CLI
+- `bestbuy/search.py` — raw HTML fetch and parse helpers from the earlier probe path
+- `bestbuy/browser_search.py` — browser-backed store selection and hydrated result extraction
+- `scripts/fetch_search_results.py` — JSON CLI entrypoint for the raw HTML path
+- `scripts/hourly_available_report.py` — human-readable browser-backed hourly report CLI
 - `scripts/probe_search_page.py` — low-level reachability probe from the first pass
 - `reports/initial_probe.json` — raw low-level probe output
 - `reports/initial_probe.md` — first-pass summary
@@ -33,6 +41,7 @@ That points to request fingerprinting / bot mitigation, not a basic network fail
 
 ```bash
 python3 -m pip install -r requirements.txt
+PLAYWRIGHT_BROWSERS_PATH=/data/pw-browsers python3 -m playwright install chromium
 ```
 
 ## Usage
@@ -54,11 +63,12 @@ python3 scripts/fetch_search_results.py \
   --pretty
 ```
 
-Print the hourly human-readable availability report:
+Print the hourly human-readable browser-backed availability report:
 
 ```bash
-python3 scripts/hourly_available_report.py \
-  --url 'https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&qp=parent_laptopscreensizesv_facet%3DScreen+Size%7E14%22+-+15.9%22%5Eparent_laptopscreensizesv_facet%3DScreen+Size%7E12%22+-+13.9%22%5Econdition_facet%3DOpen-Box%7EOpen-Box%5Esystemmemoryram_facet%3DRAM%7E32+gigabytes%5Esystemmemoryram_facet%3DRAM%7E64+gigabytes%5Esystemmemoryram_facet%3DRAM%7E128+gigabytes%5Esystemmemoryram_facet%3DRAM%7E36+gigabytes&st=5070+Ti+laptop'
+PLAYWRIGHT_BROWSERS_PATH=/data/pw-browsers python3 scripts/hourly_available_report.py \
+  --url 'https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&qp=parent_laptopscreensizesv_facet%3DScreen+Size%7E14%22+-+15.9%22%5Eparent_laptopscreensizesv_facet%3DScreen+Size%7E12%22+-+13.9%22%5Econdition_facet%3DOpen-Box%7EOpen-Box%5Esystemmemoryram_facet%3DRAM%7E32+gigabytes%5Esystemmemoryram_facet%3DRAM%7E64+gigabytes%5Esystemmemoryram_facet%3DRAM%7E128+gigabytes%5Esystemmemoryram_facet%3DRAM%7E36+gigabytes&st=5070+Ti+laptop' \
+  --store 'Union City'
 ```
 
 Fetch live and save the raw HTML too:

@@ -7,24 +7,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bestbuy.search import FetchConfig, fetch_all_search_results, format_hourly_report
+from bestbuy.browser_search import fetch_available_results_browser, format_browser_report
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Fetch every page for a Best Buy search query and print available laptops.'
+        description='Run a browser-backed Best Buy search and print currently available laptops.'
     )
     parser.add_argument('--url', required=True, help='Best Buy search URL to scan')
-    parser.add_argument('--max-pages', type=int, default=20, help='Max pages to scan')
-    parser.add_argument(
-        '--include-unavailable',
-        action='store_true',
-        help='Print every parsed result, not just currently available ones',
-    )
+    parser.add_argument('--store', default='Union City', help='Store name to set before scanning')
+    parser.add_argument('--max-pages', type=int, default=4, help='Max pages to scan')
     args = parser.parse_args()
 
-    report = fetch_all_search_results(args.url, config=FetchConfig(), max_pages=args.max_pages)
-    print(format_hourly_report(report, available_only=not args.include_unavailable))
+    report = fetch_available_results_browser(
+        args.url,
+        store_name=args.store,
+        max_pages=args.max_pages,
+        headless=True,
+    )
+    print(format_browser_report(report))
     return 0
 
 
