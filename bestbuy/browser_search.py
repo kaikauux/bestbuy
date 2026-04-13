@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -17,6 +18,9 @@ class BrowserResult:
     title: str
     href: str
     open_box_price: str | None
+    regular_price: str | None
+    savings: str | None
+    condition: str | None
     rating: float | None
     review_count: int | None
     available: bool
@@ -77,16 +81,118 @@ def parse_card_text(text: str, href: str) -> BrowserResult | None:
     has_open_box_action = 'Shop Open-Box' in clean or price_match is not None
     unavailable = 'Unavailable' in clean and not has_open_box_action
 
+    # Extract condition from the URL href (e.g. condition=excellent, condition=good, condition=fair)
+    condition = None
+    cond_match = re.search(r'condition=(excellent|good|fair)', href, re.IGNORECASE)
+    if cond_match:
+        condition = cond_match.group(1).capitalize()
+
     return BrowserResult(
         title=title,
         href=href,
         open_box_price=price_match.group(1) if price_match else None,
+        regular_price=None,
+        savings=None,
+        condition=condition,
         rating=float(rating_match.group(1)) if rating_match else None,
         review_count=int(rating_match.group(2).replace(',', '')) if rating_match else None,
         available=has_open_box_action and not unavailable,
         availability_note=availability_note,
         raw_text=clean,
     )
+
+
+def parse_apollo_ssr(html: str) -> dict[str, dict[str, Any]]:
+    """Extract open-box pricing metadata from Apollo SSR payloads in page HTML.
+
+    Returns a dict keyed by skuId, each value containing:
+      - regular_price: the new/product regular price (float)
+      - open_box_options: list of dicts with keys condition, customer_price, open_box_savings, sku_id, url
+    """
+    apollo_pattern = r'\(window\[Symbol\.for\("ApolloSSRDataTransport"\)\]\s*\?\?=\s*\[\]\)\.push\((.+?)\);?\s*</script>'
+    matches = re.findall(apollo_pattern, html, re.DOTALL)
+
+    sku_map: dict[str, dict[str, Any]] = {}
+
+    for payload_text in matches:
+        # Normalize JS undefined to JSON null
+        normalized = payload_text
+        normalized = re.sub(r':undefined', ':null', normalized)
+        normalized = re.sub(r'\[undefined', '[null', normalized)
+        normalized = re.sub(r',undefined', ',null', normalized)
+
+        try:
+            data = json.loads(normalized)
+        except json.JSONDecodeError:
+            continue
+
+        def find_key(obj, key, depth=0):
+            if depth > 10:
+                return None
+            if isinstance(obj, dict):
+                if key in obj:
+                    return obj[key]
+                for v in obj.values():
+                    result = find_key(v, key, depth + 1)
+                    if result is not None:
+                        return result
+            elif isinstance(obj, list):
+                for item in obj:
+                    result = find_key(item, key, depth + 1)
+                    if result is not None:
+                        return result
+            return None
+
+        search_data = find_key(data, 'detailedProductSearch')
+        if not search_data or not isinstance(search_data, dict):
+            continue
+        documents = search_data.get('documents')
+        if not isinstance(documents, list):
+            continue
+
+        for doc in documents:
+            product = doc.get('product')
+            if not product:
+                continue
+
+            sku_id = product.get('skuId')
+            if not sku_id:
+                continue
+
+            # Get regular price from the product-level price object
+            regular_price = None
+            price_obj = product.get('price', {})
+            if isinstance(price_obj, dict):
+                regular_price = price_obj.get('displayableRegularPrice') or price_obj.get('customerPrice')
+
+            # Get open-box options
+            ob_options = product.get('openBoxOptions', [])
+            if not isinstance(ob_options, list):
+                ob_options = []
+
+            open_box_entries = []
+            for ob in ob_options:
+                ob_product = ob.get('product', {})
+                ob_price = ob_product.get('price', {})
+                ob_sku = ob_product.get('skuId') or sku_id
+                ob_url_obj = ob_product.get('url', {})
+                ob_url = ob_url_obj.get('pdp', '') if isinstance(ob_url_obj, dict) else ''
+
+                entry = {
+                    'condition': ob.get('type'),  # Excellent, Good, Fair
+                    'customer_price': ob_price.get('customerPrice'),
+                    'open_box_savings': ob_price.get('openBoxSavings'),
+                    'sku_id': ob_sku,
+                    'url': ob_url,
+                }
+                open_box_entries.append(entry)
+
+            sku_map[sku_id] = {
+                'regular_price': regular_price,
+                'open_box_options': open_box_entries,
+            }
+
+    return sku_map
 
 
 def _extract_body_meta(body_text: str) -> tuple[int | None, str | None, str | None, str | None]:
@@ -140,6 +246,42 @@ def _extract_results_from_page(page) -> list[BrowserResult]:
     return list(collected.values())
 
 
+def _enrich_with_apollo(results: list[BrowserResult], sku_map: dict[str, dict[str, Any]]) -> None:
+    """Enrich BrowserResult items with regular_price, savings, and condition from Apollo data.
+
+    Matches by extracting skuId from the result href, then finding the matching
+    open-box condition in the Apollo data.
+    """
+    for result in results:
+        # Extract SKU ID from href (patterns like /sku/6619196/ or sku/6619196)
+        sku_match = re.search(r'/sku/(\d+)', result.href)
+        if not sku_match:
+            continue
+        sku_id = sku_match.group(1)
+
+        apollo_data = sku_map.get(sku_id)
+        if not apollo_data:
+            continue
+
+        # Set regular price
+        if apollo_data.get('regular_price') is not None:
+            result.regular_price = f"{apollo_data['regular_price']:,.2f}"
+
+        # Find the matching open-box condition
+        condition_lower = (result.condition or '').lower()
+        for ob in apollo_data.get('open_box_options', []):
+            ob_cond_lower = (ob.get('condition') or '').lower()
+            if ob_cond_lower == condition_lower:
+                if ob.get('open_box_savings') is not None:
+                    result.savings = f"{ob['open_box_savings']:,.2f}"
+                if ob.get('customer_price') is not None and result.open_box_price is None:
+                    result.open_box_price = f"{ob['customer_price']:,.2f}"
+                # If we don't have condition from URL, use Apollo's
+                if not result.condition and ob.get('condition'):
+                    result.condition = ob.get('condition')
+                break
+
+
 def fetch_available_results_browser(
     search_url: str,
     *,
@@ -162,6 +304,7 @@ def fetch_available_results_browser(
         shipping_summary = None
         shipping_zip = None
         pages_scanned = 0
+        combined_sku_map: dict[str, dict[str, Any]] = {}
 
         for page_number in range(1, max_pages + 1):
             context = browser.new_context(
@@ -181,6 +324,12 @@ def fetch_available_results_browser(
             page.wait_for_timeout(12000)
             _scroll_page(page)
             page_results = _extract_results_from_page(page)
+
+            # Extract Apollo SSR data from this page's HTML
+            html = page.content()
+            page_sku_map = parse_apollo_ssr(html)
+            combined_sku_map.update(page_sku_map)
+
             body_text = page.locator('body').inner_text()
             if result_count_label is None:
                 result_count_label, pickup_summary, shipping_summary, shipping_zip = _extract_body_meta(body_text)
@@ -191,6 +340,9 @@ def fetch_available_results_browser(
             all_results.extend(page_results)
 
         browser.close()
+
+    # Enrich results with Apollo data
+    _enrich_with_apollo(all_results, combined_sku_map)
 
     deduped: list[dict[str, Any]] = []
     seen = set()
@@ -241,12 +393,20 @@ def format_browser_report(report: BrowserReport) -> str:
 
     for index, result in enumerate(report.results, start=1):
         price = f"${result['open_box_price']}" if result.get('open_box_price') else 'n/a'
+        savings = ''
+        if result.get('savings'):
+            savings = f" (save ${result['savings']})"
+        condition = ''
+        if result.get('condition'):
+            condition = f" [{result['condition']}]"
         rating = ''
         if result.get('rating') is not None:
             rating = f" | Rating: {result['rating']} ({result.get('review_count') or 0} reviews)"
         note = f" | {result['availability_note']}" if result.get('availability_note') else ''
-        lines.append(f"{index}. {result['title']} — {price}{rating}{note}")
+        lines.append(f"{index}. {result['title']} — {price}{savings}{condition}{rating}{note}")
         lines.append(f"   URL: {result['href']}")
+        if result.get('regular_price'):
+            lines.append(f"   Regular price: ${result['regular_price']}")
         lines.append('')
 
     return '\n'.join(lines).rstrip()
