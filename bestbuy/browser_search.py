@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 STORE_LOCATOR_URL = 'https://www.bestbuy.com/site/store-locator'
 RESULT_CARD_SELECTOR = '.product-list-item.grid-view'
+DEFAULT_GEOLOCATION = {'latitude': 37.5934, 'longitude': -122.0438}
 
 
 @dataclass
@@ -142,12 +143,14 @@ def fetch_available_results_browser(
     search_url: str,
     *,
     store_name: str = 'Union City',
+    geolocation: dict[str, float] | None = None,
     max_pages: int = 4,
     headless: bool = True,
 ):
     from playwright.sync_api import sync_playwright
 
     fetched_at = datetime.now(timezone.utc).isoformat()
+    effective_geolocation = geolocation or DEFAULT_GEOLOCATION
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
 
@@ -159,7 +162,12 @@ def fetch_available_results_browser(
         pages_scanned = 0
 
         for page_number in range(1, max_pages + 1):
-            context = browser.new_context(viewport={'width': 1440, 'height': 2200})
+            context = browser.new_context(
+                viewport={'width': 1440, 'height': 2200},
+                locale='en-US',
+                geolocation=effective_geolocation,
+                permissions=['geolocation'],
+            )
             page = context.new_page()
 
             page.goto(STORE_LOCATOR_URL, wait_until='domcontentloaded', timeout=120000)
