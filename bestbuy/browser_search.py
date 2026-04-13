@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-STORE_LOCATOR_URL = 'https://www.bestbuy.com/site/store-locator'
-RESULT_CARD_SELECTOR = '.product-list-item.grid-view'
+HOME_URL = 'https://www.bestbuy.com/'
+RESULT_CARD_SELECTOR = '#main-results .product-list-item.grid-view'
 DEFAULT_GEOLOCATION = {'latitude': 37.5934, 'longitude': -122.0438}
+DEFAULT_STORE_COOKIE = '1021'
 
 
 @dataclass
@@ -143,6 +144,7 @@ def fetch_available_results_browser(
     search_url: str,
     *,
     store_name: str = 'Union City',
+    store_cookie_id: str = DEFAULT_STORE_COOKIE,
     geolocation: dict[str, float] | None = None,
     max_pages: int = 4,
     headless: bool = True,
@@ -168,18 +170,15 @@ def fetch_available_results_browser(
                 geolocation=effective_geolocation,
                 permissions=['geolocation'],
             )
+            context.add_cookies([
+                {'name': 'locStoreId', 'value': store_cookie_id, 'domain': '.bestbuy.com', 'path': '/'},
+            ])
             page = context.new_page()
 
-            page.goto(STORE_LOCATOR_URL, wait_until='domcontentloaded', timeout=120000)
-            page.wait_for_timeout(5000)
-            store_card = page.get_by_text(store_name, exact=True).locator(
-                'xpath=ancestor::*[contains(@id,"shop-location-card")][1]'
-            )
-            store_card.get_by_role('button', name='Make This Your Store').click()
-            page.wait_for_timeout(5000)
-
-            page.goto(set_page_number(search_url, page_number), wait_until='domcontentloaded', timeout=120000)
+            page.goto(HOME_URL, wait_until='domcontentloaded', timeout=120000)
             page.wait_for_timeout(8000)
+            page.goto(set_page_number(search_url, page_number), wait_until='domcontentloaded', timeout=120000)
+            page.wait_for_timeout(12000)
             _scroll_page(page)
             page_results = _extract_results_from_page(page)
             body_text = page.locator('body').inner_text()
@@ -220,7 +219,7 @@ def format_browser_report(report: BrowserReport) -> str:
     lines = [
         'Best Buy hourly laptop report',
         f'Generated: {report.fetched_at}',
-        f'Store context: {report.store_name}',
+        f'Store context: {report.store_name} (locStoreId cookie)',
     ]
     if report.result_count_label is not None:
         lines.append(f'Results on Best Buy page: {report.result_count_label}')
