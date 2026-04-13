@@ -1,0 +1,38 @@
+{
+  "dns": {
+    "elapsed_s": 0.013,
+    "ok": true,
+    "result": {
+      "addresses": [
+        "184.28.148.209"
+      ],
+      "aliases": [
+        "www.bestbuy.com",
+        "www.bestbuy.com.edgekey.net"
+      ],
+      "cname": "e5816.x.akamaiedge.net"
+    }
+  },
+  "get": {
+    "elapsed_s": 10.021,
+    "error": "TimeoutError('The read operation timed out')",
+    "ok": false
+  },
+  "head": {
+    "elapsed_s": 10.025,
+    "error": "TimeoutError('The read operation timed out')",
+    "ok": false
+  },
+  "host": "www.bestbuy.com",
+  "tcp_443": {
+    "elapsed_s": 0.003,
+    "ok": true,
+    "result": {
+      "peer": [
+        "184.28.148.209",
+        443
+      ]
+    }
+  },
+  "url": "https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&qp=parent_laptopscreensizesv_facet%3DScreen+Size%7E14%22+-+15.9%22%5Eparent_laptopscreensizesv_facet%3DScreen+Size%7E12%22+-+13.9%22%5Econdition_facet%3DOpen-Box%7EOpen-Box%5Esystemmemoryram_facet%3DRAM%7E32+gigabytes%5Esystemmemoryram_facet%3DRAM%7E64+gigabytes%5Esystemmemoryram_facet%3DRAM%7E128+gigabytes%5Esystemmemoryram_facet%3DRAM%7E36+gigabytes&st=5070+Ti+laptop"
+}
